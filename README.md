@@ -1,0 +1,177 @@
+<!-- pixeltable-example-app: 20260926-plant-care -->
+# Plant Care API built with Pixeltable
+
+[![Built with Pixeltable](https://img.shields.io/badge/built%20with-Pixeltable-5b4bff)](https://pixeltable.com)
+[![PyPI - pixeltable](https://img.shields.io/pypi/v/pixeltable?label=pixeltable)](https://pypi.org/project/pixeltable/)
+[![GitHub stars](https://img.shields.io/github/stars/pixeltable/pixeltable?style=social)](https://github.com/pixeltable/pixeltable)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+
+A small plant-care log for your houseplants. Record the species, where it lives, how the soil feels and how many days since the last watering. Pixeltable computes a watering recommendation from moisture plus days-since-water, and keeps a short care note. Ask `GET /plants/thirsty` which plants need water today: it's a `@pxt.query` over the computed column.
+
+[Pixeltable](https://pixeltable.com) is open-source, Python-native **multimodal AI data infrastructure**: tables, incremental computed columns, UDFs, indexes and serving in one library, running locally or on Pixeltable Cloud.
+
+> ⭐ **Like this example?** Star [pixeltable/pixeltable](https://github.com/pixeltable/pixeltable) on GitHub. It helps other developers find it.
+
+## What this example shows
+
+- **FastAPI serving**: one `FastAPIRouter` turns tables and `@pxt.query` functions into typed REST routes (insert, update, delete, compute and query) with OpenAPI docs
+- **Incremental computed columns** powered by plain Python UDFs (`@pxt.udf`)
+- **Importable UDF module**: UDFs in `udfs.py`, tables in `models.py`, queries in `queries.py`, routes in `app.py` (Pixeltable resolves UDFs by module path)
+- **`pixeltable.toml`** declares a local database and a **Pixeltable Cloud** database, so the same code deploys with `pxt db update`
+
+## The watering rule
+
+`water_advice(moisture, days_since_water)` in `udfs.py` is ordinary Python:
+
+| moisture | days since water | advice |
+|----------|------------------|--------|
+| `dry` | any | `water today` |
+| `slightly-dry` | 4 or more | `water today` |
+| `slightly-dry` | under 4 | `check tomorrow` |
+| `moist` / `wet` | any | `skip` |
+
+Change the rule, run `pxt recompute plants/plants water_label`, and every stored row picks up the new logic.
+
+## What's inside
+
+| File | What it is |
+|------|------------|
+| `app.py` | The API: one `FastAPIRouter` wiring the tables and queries into REST routes |
+| `client_demo.py` | Ask for watering advice, add a plant, water it and list thirsty plants through the API |
+| `models.py` | Tables declared as Python classes: columns, computed columns, indexes |
+| `pixeltable.toml` | Project config: the local database plus a Pixeltable Cloud database (sizing, deploy excludes) |
+| `queries.py` | `@pxt.query` functions served as query routes |
+| `seed.py` | Seed a few houseplants |
+| `udfs.py` | Pixeltable UDFs (`@pxt.udf`) in their own importable module |
+| `requirements.txt` / `pyproject.toml` | Dependencies (`pixeltable[serve]>=0.7.14`) |
+
+**Tables**
+
+| Table | Stored columns | Computed columns |
+|-------|---------|------------------|
+| `plants` | `species`, `location`, `moisture`, `days_since_water`, `notes` | `id`, `water_label`, `species_upper`, `notes_blurb` |
+
+**API routes** (service `plants_api`)
+
+| Method | Path | Kind | Backed by | Notes |
+|--------|------|------|-----------|-------|
+| `POST` | `/plants` | insert | `Plants` |  |
+| `POST` | `/plants/update` | update | `Plants` |  |
+| `POST` | `/water-label` | compute | `Plants` |  |
+| `GET` | `/plants/thirsty` | query | `thirsty` |  |
+
+## Quickstart
+
+Requires Python 3.11+ and `pixeltable[serve]>=0.7.14`.
+
+```bash
+git clone https://github.com/pierrebrunelle/pixeltable-plant-care.git
+cd pixeltable-plant-care
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+
+# Create the tables in a local catalog directory named `plants`
+pxt schema update app.py plants
+
+python seed.py plants
+pxt service run app.py plants --port 8000   # open http://localhost:8000/docs
+python client_demo.py                      # in another terminal
+```
+
+Try it:
+
+```bash
+curl -s -X POST localhost:8000/water-label -H 'Content-Type: application/json' -d '{"moisture": "dry", "days_since_water": 2}'
+curl -s localhost:8000/plants/thirsty
+```
+
+## Deploy to Pixeltable Cloud
+
+The same `app.py` runs on [Pixeltable Cloud](https://pixeltable.com). Sign in (or get a free trial database with `pxt new`), point the second database entry in `pixeltable.toml` at your own database, then deploy:
+
+```bash
+pxt login                       # or: export PIXELTABLE_API_KEY=<your-api-key>
+# edit pixeltable.toml: name = 'pxt://<your-org>:<your-db>'
+pxt db update pxt://<your-org>:<your-db>                 # build the image and upload the project
+pxt schema update app.py pxt://<your-org>:<your-db>/plants   # create the tables in the hosted database
+pxt service update app.py pxt://<your-org>:<your-db>/plants  # start the API there
+pxt service list pxt://<your-org>:<your-db>              # list hosted services
+```
+
+Hosted routes require an API key: send it in the `X-api-key` header (for example `-H "X-api-key: $PIXELTABLE_API_KEY"`). Keep keys in environment variables or `pxt secret set`, never in code.
+
+## Code walkthrough
+
+**1. Business logic is plain Python, in `udfs.py`.** A `@pxt.udf` function can be used as a column expression. Pixeltable records UDFs by module path (`udfs.water_advice`), so they live in their own importable module rather than inline in the app: the daemon, serving workers and Pixeltable Cloud import it again by that path.
+
+```python
+# udfs.py
+@pxt.udf
+def water_advice(moisture: str | None, days_since_water: int | None) -> str:
+    m = (moisture or '').strip().lower()
+    d = days_since_water or 0
+    if m == 'dry' or (m == 'slightly-dry' and d >= 4):
+        return 'water today'
+    if m == 'slightly-dry':
+        return 'check tomorrow'
+    if m in ('moist', 'wet'):
+        return 'skip'
+    return 'check soil'
+```
+
+**2. Tables are Python classes (`models.py`).** Annotated attributes are stored columns; attributes assigned an expression are **computed columns** (`id`, `water_label`, `species_upper`, `notes_blurb`), evaluated incrementally on every insert or update and recomputed when their inputs change.
+
+```python
+# models.py
+class Plants(TableModel, name='plants'):
+    id = pxt.Column(value=pxtf.uuid.uuid7(), primary_key=True)
+    species: pxt.String
+    location: pxt.String
+    moisture: pxt.String | None
+    days_since_water: pxt.Int | None
+    notes: pxt.String | None
+
+    water_label = water_advice(moisture, days_since_water)
+    species_upper = pxtf.string.upper(species)
+    notes_blurb = care_blurb(species, location)
+```
+
+**3. Queries are functions (`queries.py`).** `@pxt.query` wraps a Pixeltable query so it can be called from Python or exposed as a route:
+
+```python
+# queries.py
+@pxt.query
+def thirsty():
+    """Plants whose computed advice is 'water today'."""
+    return Plants.where(Plants.water_label == 'water today').select(
+        Plants.id, Plants.notes_blurb, Plants.days_since_water
+    ).order_by(Plants.days_since_water, asc=False)
+```
+
+**4. One router, a full REST API.** `FastAPIRouter` generates request/response models from the column types, validates input, and publishes OpenAPI docs at `/docs`:
+
+```python
+# app.py
+plants_api = FastAPIRouter(name='plants_api')
+plants_api.add_insert_route(
+    Plants, path='/plants',
+    inputs=[Plants.species, Plants.location, Plants.moisture, Plants.days_since_water, Plants.notes],
+    outputs=[Plants.id, Plants.water_label, Plants.species_upper, Plants.notes_blurb],
+)
+plants_api.add_update_route(Plants, path='/plants/update', inputs=[Plants.moisture, Plants.days_since_water],
+                            outputs=[Plants.id, Plants.water_label])
+plants_api.add_compute_route(Plants, path='/water-label', inputs=[Plants.moisture, Plants.days_since_water],
+                             outputs=[Plants.water_label])
+plants_api.add_query_route(path='/plants/thirsty', query=thirsty, method='get')
+```
+
+## Learn more
+
+- 🌐 Website: https://pixeltable.com
+- 📚 Docs: https://docs.pixeltable.com
+- 💻 Source: https://github.com/pixeltable/pixeltable (⭐ star it if Pixeltable is useful to you)
+- 📦 PyPI: https://pypi.org/project/pixeltable/
+
+---
+
+<sub>Built as part of a daily series of Pixeltable example apps · Pixeltable 0.7.14 · Python, FastAPI, incremental computed columns · Licensed under Apache-2.0.</sub>
