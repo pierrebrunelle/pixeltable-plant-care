@@ -3,11 +3,39 @@
     pxt schema update app.py plants
     pxt service run app.py plants
 """
+import pixeltable as pxt
+import pixeltable.functions as pxtf
 from pixeltable.serving import FastAPIRouter
 
-from models import Plants, TableModel  # noqa: F401  (TableModel lets `pxt schema` find the models)
-from queries import thirsty
+from udfs import care_blurb, water_advice
 
+# ---- tables ----
+TableModel = pxt.model_base()
+
+
+class Plants(TableModel, name='plants'):
+    id = pxt.Column(value=pxtf.uuid.uuid7(), primary_key=True)
+    species: pxt.String
+    location: pxt.String
+    moisture: pxt.String | None
+    days_since_water: pxt.Int | None
+    notes: pxt.String | None
+
+    water_label = water_advice(moisture, days_since_water)
+    species_upper = pxtf.string.upper(species)
+    notes_blurb = care_blurb(species, location)
+
+
+# ---- queries ----
+@pxt.query
+def thirsty():
+    """Plants whose computed advice is 'water today'."""
+    return Plants.where(Plants.water_label == 'water today').select(
+        Plants.id, Plants.notes_blurb, Plants.days_since_water
+    ).order_by(Plants.days_since_water, asc=False)
+
+
+# ---- routes ----
 plants_api = FastAPIRouter(name='plants_api')
 plants_api.add_insert_route(
     Plants, path='/plants',
